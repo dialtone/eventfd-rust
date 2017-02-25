@@ -6,7 +6,7 @@
 
 extern crate nix;
 
-pub use nix::sys::eventfd::{EventFdFlag, EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE};
+pub use nix::sys::eventfd::{EfdFlags, EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE};
 use nix::sys::eventfd::eventfd;
 use nix::unistd::{dup, close, write, read};
 
@@ -18,7 +18,7 @@ use std::mem;
 
 pub struct EventFD {
     fd: RawFd,
-    flags: EventFdFlag,
+    flags: EfdFlags,
 }
 
 unsafe impl Send for EventFD {}
@@ -30,7 +30,7 @@ impl EventFD {
     ///
     /// TODO: work out how to integrate this FD into the wider world
     /// of fds. There's currently no way to poll/select on the fd.
-    pub fn new(initval: usize, flags: EventFdFlag) -> io::Result<EventFD> {
+    pub fn new(initval: u32, flags: EfdFlags) -> io::Result<EventFD> {
         Ok(EventFD { fd: try!(eventfd(initval, flags)), flags: flags })
     }
 
@@ -109,13 +109,13 @@ impl Clone for EventFD {
 #[cfg(test)]
 mod test {
     extern crate std;
-    use super::{EventFdFlag, EventFD, EFD_SEMAPHORE, EFD_NONBLOCK};
+    use super::{EfdFlags, EventFD, EFD_SEMAPHORE, EFD_NONBLOCK};
     use std::thread;
 
     #[test]
     fn test_basic() {
         let (tx,rx) = std::sync::mpsc::channel();
-        let efd = match EventFD::new(10, EventFdFlag::empty()) {
+        let efd = match EventFD::new(10, EfdFlags::empty()) {
             Err(e) => panic!("new failed {}", e),
             Ok(fd) => fd,
         };
@@ -182,7 +182,7 @@ mod test {
     #[test]
     fn test_chan() {
         let (tx,rx) = std::sync::mpsc::channel();
-        let efd = match EventFD::new(10, EventFdFlag::empty()) {
+        let efd = match EventFD::new(10, EfdFlags::empty()) {
             Err(e) => panic!("new failed {}", e),
             Ok(fd) => fd,
         };
