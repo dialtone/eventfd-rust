@@ -9,6 +9,5 @@ readme = "README.md"
 license = "MIT"
 
 [dependencies.nix]
-git = "https://github.com/nix-rust/nix.git"
 features = [ "eventfd" ]
 version = "0.8.0"
