@@ -7,7 +7,7 @@ description = "Binding to Linux's eventfd syscall"
 repository = "https://github.com/jsgf/eventfd-rust.git"
 readme = "README.md"
 license = "MIT"
+edition = "2018"
 
-[dependencies.nix]
-features = [ "eventfd" ]
-version = "0.8.0"
+[dependencies]
+nix = "0.14"

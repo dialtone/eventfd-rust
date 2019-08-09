@@ -4,17 +4,15 @@
 //! This crate implements a simple binding for Linux eventfd(). See
 //! eventfd(2) for specific details of behaviour.
 
-extern crate nix;
-
-pub use nix::sys::eventfd::{EfdFlags, EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE};
 use nix::sys::eventfd::eventfd;
-use nix::unistd::{dup, close, write, read};
+pub use nix::sys::eventfd::EfdFlags;
+use nix::unistd::{close, dup, read, write};
+use nix::Result;
 
-use std::io;
-use std::os::unix::io::{AsRawFd,RawFd};
-use std::thread;
-use std::sync::mpsc;
 use std::mem;
+use std::os::unix::io::{AsRawFd, RawFd};
+use std::sync::mpsc;
+use std::thread;
 
 pub struct EventFD {
     fd: RawFd,
@@ -30,25 +28,28 @@ impl EventFD {
     ///
     /// TODO: work out how to integrate this FD into the wider world
     /// of fds. There's currently no way to poll/select on the fd.
-    pub fn new(initval: u32, flags: EfdFlags) -> io::Result<EventFD> {
-        Ok(EventFD { fd: try!(eventfd(initval, flags)), flags: flags })
+    pub fn new(initval: u32, flags: EfdFlags) -> Result<EventFD> {
+        Ok(EventFD {
+            fd: eventfd(initval, flags)?,
+            flags: flags,
+        })
     }
 
     /// Read the current value of the eventfd. This will block until
     /// the value is non-zero. In semaphore mode this will only ever
     /// decrement the count by 1 and return 1; otherwise it atomically
     /// returns the current value and sets it to zero.
-    pub fn read(&self) -> io::Result<u64> {
+    pub fn read(&self) -> Result<u64> {
         let mut buf = [0u8; 8];
-        let _ = try!(read(self.fd, &mut buf));
+        let _ = read(self.fd, &mut buf)?;
         let val = unsafe { mem::transmute(buf) };
         Ok(val)
     }
 
     /// Add to the current value. Blocks if the value would wrap u64.
-    pub fn write(&self, val: u64) -> io::Result<()> {
+    pub fn write(&self, val: u64) -> Result<()> {
         let buf: [u8; 8] = unsafe { mem::transmute(val) };
-        try!(write(self.fd, &buf));
+        write(self.fd, &buf)?;
         Ok(())
     }
 
@@ -67,15 +68,13 @@ impl EventFD {
         let (tx, rx) = mpsc::sync_channel(1);
         let c = self.clone();
 
-        thread::spawn(move || {
-            loop {
-                match c.read() {
-                    Ok(v) => match tx.send(v) {
-                        Ok(_) => (),
-                        Err(_) => break,
-                    },
-                    Err(e) => panic!("read failed: {}", e),
-                }
+        thread::spawn(move || loop {
+            match c.read() {
+                Ok(v) => match tx.send(v) {
+                    Ok(_) => (),
+                    Err(_) => break,
+                },
+                Err(e) => panic!("read failed: {}", e),
             }
         });
 
@@ -102,19 +101,22 @@ impl Drop for EventFD {
 /// indistinguishable from the original.
 impl Clone for EventFD {
     fn clone(&self) -> EventFD {
-        EventFD { fd: dup(self.fd).unwrap(), flags: self.flags }
+        EventFD {
+            fd: dup(self.fd).unwrap(),
+            flags: self.flags,
+        }
     }
 }
 
 #[cfg(test)]
 mod test {
-    extern crate std;
-    use super::{EfdFlags, EventFD, EFD_SEMAPHORE, EFD_NONBLOCK};
+    use super::{EfdFlags, EventFD};
+    use nix::errno::Errno;
     use std::thread;
 
     #[test]
     fn test_basic() {
-        let (tx,rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let efd = match EventFD::new(10, EfdFlags::empty()) {
             Err(e) => panic!("new failed {}", e),
             Ok(fd) => fd,
@@ -137,13 +139,18 @@ mod test {
 
     #[test]
     fn test_sema() {
-        let efd = match EventFD::new(0, EFD_SEMAPHORE | EFD_NONBLOCK) {
+        let efd = match EventFD::new(0, EfdFlags::EFD_SEMAPHORE | EfdFlags::EFD_NONBLOCK) {
             Err(e) => panic!("new failed {}", e),
             Ok(fd) => fd,
         };
 
         match efd.read() {
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => (), // ok
+            // If the eventfd counter is zero at the time of the call to
+            //  read(2), then the call either blocks until the counter
+            //  becomes nonzero (at which time, the read(2) proceeds as
+            //  described above) or fails with the error EAGAIN if the file
+            //  descriptor has been made nonblocking.
+            Err(ref e) if e.as_errno() == Some(Errno::EAGAIN) => (), // ok
             Err(e) => panic!("unexpected error {}", e),
             Ok(v) => panic!("unexpected success {}", v),
         }
@@ -156,7 +163,12 @@ mod test {
         assert_eq!(efd.read().unwrap(), 1);
         assert_eq!(efd.read().unwrap(), 1);
         match efd.read() {
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => (), // ok
+            // If the eventfd counter is zero at the time of the call to
+            //  read(2), then the call either blocks until the counter
+            //  becomes nonzero (at which time, the read(2) proceeds as
+            //  described above) or fails with the error EAGAIN if the file
+            //  descriptor has been made nonblocking.
+            Err(ref e) if e.as_errno() == Some(Errno::EAGAIN) => (), // ok
             Err(e) => panic!("unexpected error {}", e),
             Ok(v) => panic!("unexpected success {}", v),
         }
@@ -164,7 +176,7 @@ mod test {
 
     #[test]
     fn test_stream() {
-        let efd = match EventFD::new(11, EFD_SEMAPHORE) {
+        let efd = match EventFD::new(11, EfdFlags::EFD_SEMAPHORE) {
             Err(e) => panic!("new failed {}", e),
             Ok(fd) => fd,
         };
@@ -181,7 +193,7 @@ mod test {
 
     #[test]
     fn test_chan() {
-        let (tx,rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let efd = match EventFD::new(10, EfdFlags::empty()) {
             Err(e) => panic!("new failed {}", e),
             Ok(fd) => fd,
@@ -193,7 +205,8 @@ mod test {
         let t = thread::spawn(move || {
             let efd = rx.recv().unwrap();
             assert_eq!(efd.read().unwrap(), 11)
-        }).join();
+        })
+        .join();
 
         match t {
             Ok(_) => println!("ok"),
