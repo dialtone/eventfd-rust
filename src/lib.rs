@@ -7,8 +7,9 @@
 use nix::sys::eventfd::eventfd;
 pub use nix::sys::eventfd::EfdFlags;
 use nix::unistd::{close, dup, read, write};
-use nix::Result;
 
+use std::error::Error;
+use std::io;
 use std::mem;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::mpsc;
@@ -22,15 +23,30 @@ pub struct EventFD {
 unsafe impl Send for EventFD {}
 unsafe impl Sync for EventFD {}
 
+macro_rules! nix_to_ioerr (
+    ($expr:expr) => ({
+        match $expr {
+            Ok(val) => val,
+            Err(ref err) => return Err(
+                if let Some(errno) = err.as_errno() {
+                    io::Error::from_raw_os_error(errno as i32)
+                } else {
+                    io::Error::new(io::ErrorKind::Other, err.description())
+                }
+            )
+        }
+    })
+);
+
 impl EventFD {
     /// Create a new EventFD. Flags is the bitwise OR of EFD_* constants, or 0 for no flags.
     /// The underlying file descriptor is closed when the EventFD instance's lifetime ends.
     ///
     /// TODO: work out how to integrate this FD into the wider world
     /// of fds. There's currently no way to poll/select on the fd.
-    pub fn new(initval: u32, flags: EfdFlags) -> Result<EventFD> {
+    pub fn new(initval: u32, flags: EfdFlags) -> io::Result<EventFD> {
         Ok(EventFD {
-            fd: eventfd(initval, flags)?,
+            fd: nix_to_ioerr!(eventfd(initval, flags)),
             flags: flags,
         })
     }
@@ -39,17 +55,17 @@ impl EventFD {
     /// the value is non-zero. In semaphore mode this will only ever
     /// decrement the count by 1 and return 1; otherwise it atomically
     /// returns the current value and sets it to zero.
-    pub fn read(&self) -> Result<u64> {
+    pub fn read(&self) -> io::Result<u64> {
         let mut buf = [0u8; 8];
-        let _ = read(self.fd, &mut buf)?;
+        let _ = nix_to_ioerr!(read(self.fd, &mut buf));
         let val = unsafe { mem::transmute(buf) };
         Ok(val)
     }
 
     /// Add to the current value. Blocks if the value would wrap u64.
-    pub fn write(&self, val: u64) -> Result<()> {
+    pub fn write(&self, val: u64) -> io::Result<()> {
         let buf: [u8; 8] = unsafe { mem::transmute(val) };
-        write(self.fd, &buf)?;
+        nix_to_ioerr!(write(self.fd, &buf));
         Ok(())
     }
 
@@ -111,7 +127,7 @@ impl Clone for EventFD {
 #[cfg(test)]
 mod test {
     use super::{EfdFlags, EventFD};
-    use nix::errno::Errno;
+    use std::io;
     use std::thread;
 
     #[test]
@@ -150,7 +166,8 @@ mod test {
             //  becomes nonzero (at which time, the read(2) proceeds as
             //  described above) or fails with the error EAGAIN if the file
             //  descriptor has been made nonblocking.
-            Err(ref e) if e.as_errno() == Some(Errno::EAGAIN) => (), // ok
+            // In Rust EAGAIN and EWOULDBLOCK are wrapped in io::ErrorKind::WouldBlock
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => (), // ok
             Err(e) => panic!("unexpected error {}", e),
             Ok(v) => panic!("unexpected success {}", v),
         }
@@ -168,7 +185,8 @@ mod test {
             //  becomes nonzero (at which time, the read(2) proceeds as
             //  described above) or fails with the error EAGAIN if the file
             //  descriptor has been made nonblocking.
-            Err(ref e) if e.as_errno() == Some(Errno::EAGAIN) => (), // ok
+            // In Rust EAGAIN and EWOULDBLOCK are wrapped in io::ErrorKind::WouldBlock
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => (), // ok
             Err(e) => panic!("unexpected error {}", e),
             Ok(v) => panic!("unexpected success {}", v),
         }
